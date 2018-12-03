@@ -6,14 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"math/rand"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
-	"math/rand"
 
 	"github.com/Mellanox/sriovnet"
 	"github.com/containernetworking/cni/pkg/ipam"
@@ -21,6 +22,7 @@ import (
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	"github.com/vishvananda/netlink"
+	"github.com/alexflint/go-filemutex"
 )
 
 const defaultCNIDir = "/var/lib/cni/sriov"
@@ -32,19 +34,21 @@ type dpdkConf struct {
 	KDriver    string `json:"kernel_driver"`
 	DPDKDriver string `json:"dpdk_driver"`
 	DPDKtool   string `json:"dpdk_tool"`
-	VFID       int    `json: "vfid"`
+	VFID       int    `json:"vfid"`
 }
 
 type NetConf struct {
 	types.NetConf
-	DPDKMode bool
-	Sharedvf bool
-	DPDKConf dpdkConf `json:"dpdk,omitempty"`
-	CNIDir   string   `json:"cniDir"`
-	IF0      string   `json:"if0"`
-	IF0NAME  string   `json:"if0name"`
-	L2Mode   bool     `json:"l2enable"`
-	Vlan     int      `json:"vlan"`
+	DPDKMode     bool
+	Sharedvf     bool
+	DPDKConf     dpdkConf `json:"dpdk,omitempty"`
+	CNIDir       string   `json:"cniDir"`
+	IF0          string   `json:"if0"`
+	IF0NAME      string   `json:"if0name"`
+	L2Mode       bool     `json:"l2enable"`
+	Vlan         int      `json:"vlan"`
+	PfNetdevices []string `json:"pfNetdevices"`
+	fMutex       *filemutex.FileMutex
 }
 
 // Link names given as os.FileInfo need to be sorted by their Index
@@ -94,8 +98,8 @@ func loadConf(bytes []byte) (*NetConf, error) {
 		}
 	}
 
-	if n.IF0 == "" {
-		return nil, fmt.Errorf(`"if0" field is required. It specifies the host interface name to virtualize`)
+	if n.IF0 == "" && len(n.PfNetdevices) == 0 {
+		return nil, fmt.Errorf(`"if0" or "pfNetdevices" field is required. It specifies the host interface name to virtualize`)
 	}
 
 	if n.CNIDir == "" {
@@ -106,7 +110,24 @@ func loadConf(bytes []byte) (*NetConf, error) {
 		n.DPDKMode = true
 	}
 
+	fMutex, err := newFileLock(n.CNIDir)
+	if err == nil{
+		n.fMutex = fMutex
+	} else {
+		return nil, fmt.Errorf("failed to create the file lock under sriov data directory(%q): %v", n.CNIDir, err)
+	}
+
 	return n, nil
+}
+
+func newFileLock(lockPath string) (*filemutex.FileMutex, error) {
+	if err := os.MkdirAll(lockPath, 0700); err != nil {
+		return nil, fmt.Errorf("failed to create the sriov data directory(%q): %v", lockPath, err)
+	}
+
+	lockPath = path.Join(lockPath, "lock")
+
+	return filemutex.New(lockPath)
 }
 
 func saveScratchNetConf(containerID, dataDir string, netconf []byte) error {
@@ -136,8 +157,8 @@ func consumeScratchNetConf(containerID, dataDir string) ([]byte, error) {
 	return data, err
 }
 
-func savedpdkConf(cid, dataDir string, conf *NetConf) error {
-	dpdkconfBytes, err := json.Marshal(conf.DPDKConf)
+func saveNetConf(cid, dataDir string, conf *NetConf) error {
+	confBytes, err := json.Marshal(conf)
 	if err != nil {
 		return fmt.Errorf("error serializing delegate netconf: %v", err)
 	}
@@ -146,27 +167,59 @@ func savedpdkConf(cid, dataDir string, conf *NetConf) error {
 	cRef := strings.Join(s, "-")
 
 	// save the rendered netconf for cmdDel
-	if err = saveScratchNetConf(cRef, dataDir, dpdkconfBytes); err != nil {
+	if err = saveScratchNetConf(cRef, dataDir, confBytes); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (dc *dpdkConf) getdpdkConf(cid, podIfName, dataDir string, conf *NetConf) error {
+func (nc *NetConf) getNetConf(cid, podIfName, dataDir string, conf *NetConf) error {
 	s := []string{cid, podIfName}
 	cRef := strings.Join(s, "-")
 
-	dpdkconfBytes, err := consumeScratchNetConf(cRef, dataDir)
+	confBytes, err := consumeScratchNetConf(cRef, dataDir)
 	if err != nil {
 		return err
 	}
 
-	if err = json.Unmarshal(dpdkconfBytes, dc); err != nil {
+	if err = json.Unmarshal(confBytes, nc); err != nil {
 		return fmt.Errorf("failed to parse netconf: %v", err)
 	}
 
 	return nil
+}
+
+func saveInterfaceIdx(dataDir string, interfaceIdx int) error {
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		return fmt.Errorf("failed to create the sriov data directory(%q): %v", dataDir, err)
+	}
+
+	path := filepath.Join(dataDir, "interfaceIdx")
+
+	err := ioutil.WriteFile(path, []byte(strconv.Itoa(interfaceIdx)), 0600)
+	if err != nil {
+		return fmt.Errorf("failed to write interfaceIdx in the path(%q): %v", path, err)
+	}
+
+	return err
+}
+
+func getInterfaceIdx(dataDir string) (int, error) {
+	path := filepath.Join(dataDir, "interfaceIdx")
+
+	_, err := os.Stat(path);
+	if err == nil {
+		data, err := ioutil.ReadFile(path)
+		if err != nil {
+			return 0, fmt.Errorf("failed to read container data in the path(%q): %v", path, err)
+		}
+		return strconv.Atoi(string(data))
+	} else if os.IsNotExist(err) {
+		return 0, nil
+	} else {
+		return 0, err
+	}
 }
 
 func enabledpdkmode(conf *dpdkConf, ifname string, dpdkmode bool) error {
@@ -406,12 +459,11 @@ func setupVF(conf *NetConf, ifName string, podifName string, cid string, netns n
 			}
 		}
 	}
-
+	conf.DPDKConf.PCIaddr = pciAddr
+	conf.DPDKConf.Ifname = podifName
+	conf.DPDKConf.VFID = vfIdx
 	if conf.DPDKMode != false {
-		conf.DPDKConf.PCIaddr = pciAddr
-		conf.DPDKConf.Ifname = podifName
-		conf.DPDKConf.VFID = vfIdx
-		if err = savedpdkConf(cid, conf.CNIDir, conf); err != nil {
+		if err = saveNetConf(cid, conf.CNIDir, conf); err != nil {
 			return err
 		}
 		return enabledpdkmode(&conf.DPDKConf, infos[0].Name(), true)
@@ -468,22 +520,32 @@ func setupVF(conf *NetConf, ifName string, podifName string, cid string, netns n
 				}
 			}
 		}
+		if err = saveNetConf(cid, conf.CNIDir, conf); err != nil {
+			return fmt.Errorf("failed to save pod interface name %q: %v", ifName, err)
+		}
 		return nil
 	})
 }
 
 func releaseVF(conf *NetConf, podifName string, cid string, netns ns.NetNS) error {
-	// check for the DPDK mode and release the allocated DPDK resources
-	if conf.DPDKMode != false {
-		df := &dpdkConf{}
-		// get the DPDK net conf in cniDir
-		if err := df.getdpdkConf(cid, podifName, conf.CNIDir, conf); err != nil {
-			return err
-		}
 
+	nf := &NetConf{}
+	// get the net conf in cniDir
+	if err := nf.getNetConf(cid, podifName, conf.CNIDir, conf); err != nil {
+		return err
+	}
+
+	//if conf.IF0 == "" {
+	//	conf.IF0 = nf.IF0
+	//} else if strings.Compare(conf.IF0, nf.IF0) != 0 {
+	//	return fmt.Errorf("master device %s not equal to %s, which config saved into files", conf.IF0, nf.IF0)
+	//}
+
+	// check for the DPDK mode and release the allocated DPDK resources
+	if nf.DPDKMode != false {
 		// bind the sriov vf to the kernel driver
-		if err := enabledpdkmode(df, df.Ifname, false); err != nil {
-			return fmt.Errorf("DPDK: failed to bind %s to kernel space: %s", df.Ifname, err)
+		if err := enabledpdkmode(&nf.DPDKConf, nf.DPDKConf.Ifname, false); err != nil {
+			return fmt.Errorf("DPDK: failed to bind %s to kernel space: %s", nf.DPDKConf.Ifname, err)
 		}
 
 		// reset vlan for DPDK code here
@@ -492,8 +554,8 @@ func releaseVF(conf *NetConf, podifName string, cid string, netns ns.NetNS) erro
 			return fmt.Errorf("DPDK: master device %s not found: %v", conf.IF0, err)
 		}
 
-		if err = netlink.LinkSetVfVlan(pfLink, df.VFID, 0); err != nil {
-			return fmt.Errorf("DPDK: failed to reset vlan tag for vf %d: %v", df.VFID, err)
+		if err = netlink.LinkSetVfVlan(pfLink, nf.DPDKConf.VFID, 0); err != nil {
+			return fmt.Errorf("DPDK: failed to reset vlan tag for vf %d: %v", nf.DPDKConf.VFID, err)
 		}
 
 		return nil
@@ -524,10 +586,10 @@ func releaseVF(conf *NetConf, podifName string, cid string, netns ns.NetNS) erro
 
 	for i := 1; i <= maxSharedVf; i++ {
 		ifName := podifName
-		pfName := conf.IF0
+		pfName := nf.IF0
 		if i == maxSharedVf {
 			ifName = podifName + fmt.Sprintf("d%d", i-1)
-			pfName, err = getSharedPF(conf.IF0)
+			pfName, err = getSharedPF(nf.IF0)
 			if err != nil {
 				return fmt.Errorf("Failed to look up shared PF device: %v:", err)
 			}
@@ -622,6 +684,9 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("failed to load netconf: %v", err)
 	}
 
+	n.fMutex.Lock()
+	defer n.fMutex.Unlock()
+
 	netns, err := ns.GetNS(args.Netns)
 	if err != nil {
 		return fmt.Errorf("failed to open netns %q: %v", netns, err)
@@ -635,8 +700,32 @@ func cmdAdd(args *skel.CmdArgs) error {
 		os.Setenv("CNI_IFNAME", args.IfName)
 	}
 
-	if err = setupVF(n, n.IF0, args.IfName, args.ContainerID, netns); err != nil {
-		return fmt.Errorf("failed to set up pod interface %q from the device %q: %v", args.IfName, n.IF0, err)
+	interfaceIdx, err := getInterfaceIdx(n.CNIDir)
+
+	numOfDevices := len(n.PfNetdevices)
+	if numOfDevices > 0 {
+		for {
+			if interfaceIdx >= numOfDevices{
+				interfaceIdx = 0
+			}
+
+			n.IF0 = n.PfNetdevices[interfaceIdx]
+			interfaceIdx += 1
+
+			err = setupVF(n, n.IF0, args.IfName, args.ContainerID, netns)
+			if err == nil {
+				break
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("failed to set up pod interface %q from the device %v: %v", args.IfName, n.PfNetdevices, err)
+		} else {
+			saveInterfaceIdx(n.CNIDir, interfaceIdx)
+		}
+	} else {
+		if err = setupVF(n, n.IF0, args.IfName, args.ContainerID, netns); err != nil {
+			return fmt.Errorf("failed to set up pod interface %q from the device %q: %v", args.IfName, n.IF0, err)
+		}
 	}
 
 	// skip the IPAM allocation for the DPDK and L2 mode
