@@ -53,17 +53,6 @@ var _ = Describe("sriov Operations", func() {
 			err := json.Unmarshal([]byte(MASTER_NAMES), &tmp)
 			Expect(err).NotTo(HaveOccurred())
 
-			for _, MASTER_NAME := range tmp {
-				// Make sure master exist
-				_, err = netlink.LinkByName(MASTER_NAME)
-				Expect(err).NotTo(HaveOccurred())
-
-				// Make sure SR-IOV enabled
-				vf0Dir := fmt.Sprintf("/sys/class/net/%s/device/virtfn0/net", MASTER_NAME)
-				_, err = os.Lstat(vf0Dir)
-				Expect(err).NotTo(HaveOccurred())
-			}
-
 			return nil
 		})
 		Expect(err).NotTo(HaveOccurred())

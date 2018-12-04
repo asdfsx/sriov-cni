@@ -9,7 +9,6 @@ import (
 	"math/rand"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -22,7 +21,6 @@ import (
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	"github.com/vishvananda/netlink"
-	"github.com/alexflint/go-filemutex"
 )
 
 const defaultCNIDir = "/var/lib/cni/sriov"
@@ -48,7 +46,6 @@ type NetConf struct {
 	L2Mode       bool     `json:"l2enable"`
 	Vlan         int      `json:"vlan"`
 	PfNetdevices []string `json:"pfNetdevices"`
-	fMutex       *filemutex.FileMutex
 }
 
 type pfStat struct{
@@ -119,24 +116,7 @@ func loadConf(bytes []byte) (*NetConf, error) {
 		n.DPDKMode = true
 	}
 
-	fMutex, err := newFileLock(n.CNIDir)
-	if err == nil{
-		n.fMutex = fMutex
-	} else {
-		return nil, fmt.Errorf("failed to create the file lock under sriov data directory(%q): %v", n.CNIDir, err)
-	}
-
 	return n, nil
-}
-
-func newFileLock(lockPath string) (*filemutex.FileMutex, error) {
-	if err := os.MkdirAll(lockPath, 0700); err != nil {
-		return nil, fmt.Errorf("failed to create the sriov data directory(%q): %v", lockPath, err)
-	}
-
-	lockPath = path.Join(lockPath, "lock")
-
-	return filemutex.New(lockPath)
 }
 
 func saveScratchNetConf(containerID, dataDir string, netconf []byte) error {
@@ -197,21 +177,6 @@ func (nc *NetConf) getNetConf(cid, podIfName, dataDir string, conf *NetConf) err
 	}
 
 	return nil
-}
-
-func saveInterfaceIdx(dataDir string, interfaceIdx int) error {
-	if err := os.MkdirAll(dataDir, 0700); err != nil {
-		return fmt.Errorf("failed to create the sriov data directory(%q): %v", dataDir, err)
-	}
-
-	path := filepath.Join(dataDir, "interfaceIdx")
-
-	err := ioutil.WriteFile(path, []byte(strconv.Itoa(interfaceIdx)), 0600)
-	if err != nil {
-		return fmt.Errorf("failed to write interfaceIdx in the path(%q): %v", path, err)
-	}
-
-	return err
 }
 
 func getOrderedPF(n *NetConf) ([]string, error) {
@@ -696,9 +661,6 @@ func cmdAdd(args *skel.CmdArgs) error {
 	if err != nil {
 		return fmt.Errorf("failed to load netconf: %v", err)
 	}
-
-	n.fMutex.Lock()
-	defer n.fMutex.Unlock()
 
 	netns, err := ns.GetNS(args.Netns)
 	if err != nil {
