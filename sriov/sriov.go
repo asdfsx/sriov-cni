@@ -51,6 +51,15 @@ type NetConf struct {
 	fMutex       *filemutex.FileMutex
 }
 
+type pfStat struct{
+	PFName string
+	VFNum int
+}
+type pfStats []*pfStat
+func (s pfStats) Len() int      { return len(s) }
+func (s pfStats) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
+func (s pfStats) Less(i, j int) bool {return s[i].VFNum > s[j].VFNum }
+
 // Link names given as os.FileInfo need to be sorted by their Index
 
 type LinksByIndex []os.FileInfo
@@ -205,21 +214,25 @@ func saveInterfaceIdx(dataDir string, interfaceIdx int) error {
 	return err
 }
 
-func getInterfaceIdx(dataDir string) (int, error) {
-	path := filepath.Join(dataDir, "interfaceIdx")
-
-	_, err := os.Stat(path);
-	if err == nil {
-		data, err := ioutil.ReadFile(path)
-		if err != nil {
-			return 0, fmt.Errorf("failed to read container data in the path(%q): %v", path, err)
+func getOrderedPF(n *NetConf) ([]string, error) {
+	//check pf devices
+	var pfs pfStats
+	for _, pfName := range(n.PfNetdevices){
+		vfDir := fmt.Sprintf("/sys/class/net/%s/device/virtfn*/net/*", pfName)
+		vfs, err := filepath.Glob(vfDir)
+		if err != nil{
+			return nil, err
 		}
-		return strconv.Atoi(string(data))
-	} else if os.IsNotExist(err) {
-		return 0, nil
-	} else {
-		return 0, err
+		pfs = append(pfs, &pfStat{pfName, len(vfs)})
 	}
+
+	sort.Sort(pfs)
+
+	var result []string
+	for _, pf := range(pfs){
+		result = append(result, pf.PFName)
+	}
+	return result, nil
 }
 
 func enabledpdkmode(conf *dpdkConf, ifname string, dpdkmode bool) error {
@@ -700,18 +713,14 @@ func cmdAdd(args *skel.CmdArgs) error {
 		os.Setenv("CNI_IFNAME", args.IfName)
 	}
 
-	interfaceIdx, err := getInterfaceIdx(n.CNIDir)
-
 	numOfDevices := len(n.PfNetdevices)
 	if numOfDevices > 0 {
-		for {
-			if interfaceIdx >= numOfDevices{
-				interfaceIdx = 0
-			}
-
-			n.IF0 = n.PfNetdevices[interfaceIdx]
-			interfaceIdx += 1
-
+		orderedPF, err := getOrderedPF(n)
+		if err != nil {
+			return err
+		}
+		for _, pf := range(orderedPF){
+			n.IF0 = pf
 			err = setupVF(n, n.IF0, args.IfName, args.ContainerID, netns)
 			if err == nil {
 				break
@@ -719,8 +728,6 @@ func cmdAdd(args *skel.CmdArgs) error {
 		}
 		if err != nil {
 			return fmt.Errorf("failed to set up pod interface %q from the device %v: %v", args.IfName, n.PfNetdevices, err)
-		} else {
-			saveInterfaceIdx(n.CNIDir, interfaceIdx)
 		}
 	} else {
 		if err = setupVF(n, n.IF0, args.IfName, args.ContainerID, netns); err != nil {
