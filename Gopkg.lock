@@ -10,14 +10,6 @@
   version = "0.4"
 
 [[projects]]
-  branch = "master"
-  digest = "1:665d2b11d5b351912ef95226b68b74195521fdeed447f4b20370b998a01041eb"
-  name = "github.com/alexflint/go-filemutex"
-  packages = ["."]
-  pruneopts = "UT"
-  revision = "d358565f3c3f5334209f1e80693e4f621650c489"
-
-[[projects]]
   digest = "1:344aa05e62694fa67b788976ca5abd4d70e8df9a6ca759b2709ca4bad3c5aaea"
   name = "github.com/containernetworking/cni"
   packages = [
@@ -120,7 +112,6 @@
   analyzer-version = 1
   input-imports = [
     "github.com/Mellanox/sriovnet",
-    "github.com/alexflint/go-filemutex",
     "github.com/containernetworking/cni/pkg/ipam",
     "github.com/containernetworking/cni/pkg/ns",
     "github.com/containernetworking/cni/pkg/skel",
