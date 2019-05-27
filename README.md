@@ -27,6 +27,54 @@ Go 1.5 users will need to set `GO15VENDOREXPERIMENT=1` to get vendored dependenc
 #./build
 ```
 
+## Build image
+
+1. Install golang
+
+2. Install qemu
+   ```bash
+   sudo apt-get install qemu-kvm qemu virt-manager virt-viewer libvirt-bin
+   ```
+   
+   To support cross platform, the building scripts need to install qemu.
+   
+3. Enable docker experiment
+   
+   To enable experimental features, start the Docker daemon with the `--experimental` flag or enable the daemon flag in the /etc/docker/daemon.json configuration file:
+   ```
+   {
+       "experimental": true
+   }
+   ```
+   
+   You can check to see if experimental features are enabled on a running daemon using the following command:
+   
+   ```
+   $ docker version -f '{{.Server.Experimental}}'
+   true
+   ```
+   
+   When the building script calling `docker`, it add `--platform` parameter.
+   If `experimental` is not enabled, it will cause the following problem
+   
+   > "--platform" is only supported on a Docker daemon with experimental features enabled 
+   
+4. Build images
+   ```bash
+   $ git clone http://github.com/mellanox/sriov-cni $GOPATH/src/github.com/mellanox/sriov-cni/
+   $ cd $GOPATH/src/github.com/mellanox/sriov-cni/images
+   $ ARCH=amd64 VERSION=v1.3.0 ./build_docker.sh manifest
+   $ docker push ......
+   ```
+   
+NOTE:
+1. The new image should work with multus-cni
+2. Since it's work with multus, so don't need copy `10-sriov-cni.conf` to host
+3. Scripts in `k8s-installer` is useless
+4. To support old deploy scripts, copy `k8s-installer` to `/installer` inside image
+5. The `/installer` will be removed in the future  
+ 
+
 Upon successful build the plugin binary will be available in `bin/sriov`. 
 
 ## Enable SR-IOV

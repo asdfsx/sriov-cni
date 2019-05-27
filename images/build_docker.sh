@@ -16,8 +16,8 @@ DOCKER2MACHINEARCH[ppc64le]=ppc64le
 GIT_VER=$(git rev-list -1 HEAD)
 
 MACHINE_ARCH=$(uname -m)
-IMAGE_NAME=k8s-sriov-cni
-REPO_NAME=rdma
+IMAGE_NAME=k8s-sriov-cni-installer
+REPO_NAME=clustarai
 EMU_DOCKER_IMAGE=multiarch/qemu-user-static:register
 DEBIAN_DOCKER_IMAGE=debian:stretch-slim
 input_cmd=""
@@ -107,13 +107,14 @@ function build_different_arch_image()
 	mkdir -p ../qemu
 	cp ~/qemu/qemu-${ARCH}-static ../qemu
 	cp "../qemu/qemu-${ARCH}-static" "${interpreter}"
-	~/cli/build/docker-linux-${ARCH} build -f ../Dockerfile.${ARCH} --pull --platform ${ARCH} -t ${REPO_NAME}/${IMAGE_NAME}-${ARCH}:${VERSION} ..
+	~/cli/build/docker-linux-${ARCH} build -f ../Dockerfile.${ARCH} --pull --platform ${ARCH} -t ${REPO_NAME}/${IMAGE_NAME}:${ARCH}-${VERSION} ..
 	rm ../Dockerfile.${ARCH}
 	rm -rf ../qemu
 }
 
 function build_image()
 {
+	echo $ARCH $MACHINE_ARCH $MACHINEARCH2DOCKER_ARCH
 	if [ -z $ARCH ]; then
 		echo "ARCH is not set"
 		echo "using machine ARCH"
@@ -124,8 +125,8 @@ function build_image()
 		echo "Supported ARCHs (${VALID_DOCKER_ARCH[@]})"
                 exit 1
 	fi
-	if [[ $(docker images -q "${REPO_NAME}/${IMAGE_NAME}-${ARCH}:${VERSION}") != "" ]]; then
-		echo "Image ${REPO_NAME}/${IMAGE_NAME}-${ARCH}:${VERSION} already exists"
+	if [[ $(docker images -q "${REPO_NAME}/${IMAGE_NAME}:${ARCH}-${VERSION}") != "" ]]; then
+		echo "Image ${REPO_NAME}/${IMAGE_NAME}:${ARCH}-${VERSION} already exists"
 		return
 	fi
 	echo "Building image $IMAGE_NAME for ARCH $ARCH:"
@@ -139,7 +140,7 @@ function build_image()
 		echo "Finished building binary successfully"
 	else
 		# same arch
-		docker build -f ../Dockerfile --pull --platform ${ARCH} -t ${REPO_NAME}/${IMAGE_NAME}-${ARCH}:${VERSION} ..
+		docker build -f ../Dockerfile --pull --platform ${ARCH} -t ${REPO_NAME}/${IMAGE_NAME}:${ARCH}-${VERSION} ..
 	fi
 	rm -rf gopath
 	echo "Finished building image successfully"
@@ -161,9 +162,9 @@ function execute_cmd()
 			ARCH=$n
 			build_image
 		done
-		docker manifest create ${REPO_NAME}/${IMAGE_NAME}:${VERSION} ${REPO_NAME}/${IMAGE_NAME}-amd64:${VERSION} ${REPO_NAME}/${IMAGE_NAME}-ppc64le:${VERSION}
-		docker manifest annotate ${REPO_NAME}/$IMAGE_NAME:${VERSION} ${REPO_NAME}/$IMAGE_NAME-x86_64:${VERSION} --os linux --arch amd64
-		docker manifest annotate ${REPO_NAME}/$IMAGE_NAME:${VERSION} ${REPO_NAME}/$IMAGE_NAME-ppc64le:${VERSION} --os linux --arch ppc64le
+		docker manifest create ${REPO_NAME}/${IMAGE_NAME}:${VERSION} ${REPO_NAME}/${IMAGE_NAME}:amd64-${VERSION} ${REPO_NAME}/${IMAGE_NAME}-ppc64le:${VERSION}
+		docker manifest annotate ${REPO_NAME}/$IMAGE_NAME:${VERSION} ${REPO_NAME}/$IMAGE_NAME:x86_64-${VERSION} --os linux --arch amd64
+		docker manifest annotate ${REPO_NAME}/$IMAGE_NAME:${VERSION} ${REPO_NAME}/$IMAGE_NAME:ppc64le-${VERSION} --os linux --arch ppc64le
 	;;
 	esac
 }
